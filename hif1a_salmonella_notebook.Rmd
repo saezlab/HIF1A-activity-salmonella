@@ -1,0 +1,391 @@
+---
+title: "HIF1A response to salmonella infection"
+author: 
+- name: "Christian Holland"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+# Libraries and sources
+These libraries are required for this analysis.
+```{r "libraries", message=FALSE, warning=FALSE}
+library(tidyverse)
+library(GEOquery)
+library(limma)
+library(biobroom)
+library(VennDiagram)
+library(AachenColorPalette) # remotes::install_github("christianholland/AachenColorPalette")
+library(cowplot)
+library(msigdbr)
+library(dorothea)
+library(progeny)
+library(ggpubr)
+library(ggrepel)
+library(viper)
+library(vsn)
+```
+
+# Data preprocessing
+First we download the processed data from Gene Expression Omnibus with the accession ID GSE19174.
+```{r "download", message=FALSE, warning=FALSE, cache=TRUE}
+# load processed data from GEO
+eset = getGEO("GSE19174", GSEMatrix = TRUE, AnnotGPL = TRUE)[[1]]
+
+eset
+```
+
+From the pheno data of the expression set we can extract the relevant meta data. As we focus only on the genotype "wildtype", samples related to PARP1 knockout and corresponding controls are discarded.
+```{r "meta"}
+# extract meta data
+meta = pData(eset) %>%
+  as_tibble() %>%
+  select(sample = geo_accession,
+         genotype = `genotype:ch1`,
+         time = `infection duration:ch1`,
+         treatment = `treatment:ch1`) %>%
+  mutate(genotype = as_factor(str_remove(genotype, "PARP1 ")),
+         time = ordered(parse_number(time)),
+         treatment = case_when(str_detect(treatment, "SB300") ~ "salmonella",
+                               str_detect(treatment, "SB161") ~ "control"),
+         treatment = as_factor(treatment)) %>%
+  # subset meta data to relevant samples
+  filter(time == 10)
+
+meta
+```
+
+From GEO it is not clear if the processed data are already normalized. Based on the violins it seems that the data have not been normalized nor filtered for lowly expressed genes. Hence, we have to perfrom these steps on our own
+```{r "raw"}
+# plot log2 probe intensities distribution for the entire data set and per 
+# sample
+tidy_eset = exprs(eset) %>%
+  as.data.frame() %>%
+  gather(sample, expression) %>%
+  as_tibble()
+
+
+tidy_eset %>%
+  ggplot(aes(x=log2(expression))) +
+  geom_density() +
+  geom_vline(xintercept = 3.75)
+
+tidy_eset %>%
+  ggplot(aes(x=sample, y=log2(expression))) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_hline(yintercept = 3.75)
+
+
+```
+
+# Filter out lowly expressed probes
+Here we filter out lowly expressed probes whose intensity is below an empirical determined cutoff
+```{r "probe filtering"}
+# discard genes with an average intensity below 2**3.75
+keep=apply(exprs(eset), 1, function(row) {mean(row) >= 3.75 ** 2})
+eset_filtered = eset[keep,]
+
+tidy_eset_filtered = exprs(eset_filtered) %>%
+  as.data.frame() %>%
+  gather(sample, expression) %>%
+  as_tibble()
+
+tidy_eset_filtered %>%
+  ggplot(aes(x=sample, y=log2(expression))) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# Normalization
+Here we normalize the filtered expression set with vsn. This includes log2 transformation of the data.
+```{r "normalization", warning=FALSE}
+norm_expr = justvsn(exprs(eset_filtered))
+
+tidy_norm_expr = norm_expr %>%
+  as.data.frame() %>%
+  gather(sample, expression) %>%
+  as_tibble()
+
+tidy_norm_expr %>%
+  ggplot(aes(x=sample, y=expression)) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Annotation
+In the following steps we annotate the rownames with gene symbols and finally average the expression for each individual gene symbol. Empty strings or NA's present in rownames are removed (if available).
+```{r "annotation"}
+mat = norm_expr
+
+# add gene symbol as rownames
+rownames(mat) = fData(eset_filtered)$`Gene symbol`
+
+# summarize expression data per gene symbols
+expr = limma::avereps(mat[!is.na(rownames(mat)),])
+
+# check whether these is an NA or an emptry string in rownames
+sum(is.na(rownames(expr)))
+sum(rownames(expr) == "")
+
+# remove emptry string
+expr = expr[rownames(expr) != "",]
+
+# subset expression matrix to relevant samples
+expr = expr[,meta$sample]
+
+expr %>%
+  data.frame(check.names = F) %>%
+  rownames_to_column("gene") %>%
+  as_tibble()
+```
+
+# Differential gene expression analysis
+Here we perform differential gene expression analysis between samples treated with Salmonella and corresponding controls. As a cutoff for differential expressed genes we assume an effect size of at least 1 and fdr <= 0.05. These cutoffs are variable.
+```{r "differential gene expression analysis", message=FALSE, warning=FALSE}
+# differential gene expression analysis
+design = model.matrix(~0+treatment, meta)
+rownames(design) = meta$sample
+colnames(design) = levels(meta$treatment)
+
+# define contrasts
+contrasts = makeContrasts(
+  salm_vs_ctrl = salmonella - control,
+  levels = design
+)
+
+limma_result = lmFit(expr, design) %>%
+  contrasts.fit(contrasts) %>%
+  eBayes() %>%
+  tidy() %>%
+  select(gene, contrast = term, logFC = estimate, statistic = statistic, 
+             pval = p.value) %>%
+  group_by(contrast) %>% 
+  mutate(fdr = p.adjust(pval, method = "BH")) %>%
+  ungroup()
+
+effect_size_cutoff = 1
+fdr_cutoff = 0.05
+
+degs = limma_result %>%
+  mutate(regulation = case_when(
+    logFC >= effect_size_cutoff & fdr <= fdr_cutoff ~ "up",
+    logFC <= -effect_size_cutoff & fdr <= fdr_cutoff ~ "down",
+    TRUE ~ "ns")
+    ) %>%
+  mutate(regulation = factor(regulation, levels = c("up", "down", "ns"))) %>%
+  arrange(pval)
+
+
+```
+These are the top differentially expressed genes:
+```{r echo=FALSE}
+degs
+```
+Based on the volcano plot the salmonella infection induces massive changes in gene expression. Even though the activity of a TF is a much more robust estimation of its actual biological state than the expression, it is still worth to check the expression of Hif1a. We find the gene Hif1a strongly (and significantly) upregulated.
+```{r "volcano plot"}
+# volcano plot
+degs %>%
+  ggplot(aes(x=logFC, y=-log10(pval), color=regulation, alpha = regulation)) +
+  geom_point() +
+  labs(x="logFC", y=expression(-log['10']*"(p-value)")) +
+  scale_color_manual(values = aachen_color(c("green", "blue", "black50")), 
+                     drop = F) +
+  scale_alpha_manual(values = c(0.7,0.7,0.2), guide ="none", drop=F)
+
+# Number of deferentially expressed genes
+degs %>% count(regulation)
+
+degs %>%
+  filter(gene == "Hif1a")
+```
+
+# Regulon comparison
+As regulon resource for Hif1a we can either use DoRothEA or a gene sets from MSigDB. Here we check the overlap of target genes between these two resources. We see a reasonable overlap between both resources, however DoRothEA lists much more putative target genes. Hence, we believe it is better to continue the analysis with the regulons from DoRothEA. 
+```{r "regulon comparison"}
+# show targets of Hif1a in volcano plot
+dorothea_hif1a = dorothea::dorothea_mm %>%
+  filter(tf == "Hif1a") %>%
+  distinct(gene = target, mor)
+
+msigdb_hif1a = msigdbr(species = "Mus musculus", category = "C2", subcategory = "CGP") %>%
+  filter(gs_name == "SEMENZA_HIF1_TARGETS") %>%
+  distinct(gene = gene_symbol) %>%
+  mutate(mor = 1)
+
+# overlap of dorothea and msigdb regulons
+grid.newpage()
+draw.pairwise.venn(
+  nrow(dorothea_hif1a), 
+  nrow(msigdb_hif1a), 
+  nrow(dplyr::intersect(dorothea_hif1a, msigdb_hif1a)),
+  category = c("dorothea", "msigdb"),
+  lty = "blank",
+  cex = 1,
+  fontfamily = rep("sans", 3),
+  fill = aachen_color(c("purple", "petrol")),
+  cat.col = aachen_color(c("purple", "petrol")),
+  cat.cex = 1.1,
+  cat.fontfamily = rep("sans", 2))
+
+```
+
+# Hif1a target expression
+Here we check the expression of the target genes of Hif1a from DoRothEA and MSigDB. Hif1a is supposed to activate the expression of almost all its target genes but one (Ccnd1). Accordingly, we see that most of its targets are positively upregulated. However, we also see several target genes downregulated.
+```{r "expression of target genes"}
+d = dorothea_hif1a %>%
+  mutate(class = "dorothea")
+
+m = msigdb_hif1a %>%
+  mutate(class = "msigdb")
+
+targets = bind_rows(d, m)
+
+degs %>%
+  inner_join(targets, by="gene") %>%
+  ggplot(aes(x=logFC, y=-log10(pval), color=regulation, alpha = regulation, 
+             shape = as_factor(mor))) +
+  geom_point() +
+  facet_wrap(~class) +
+  labs(x="logFC", y=expression(-log['10']*"(p-value)")) +
+  scale_color_manual(values = aachen_color(c("green", "blue", "black50")), 
+                     drop = F) +
+  scale_alpha_manual(values = c(0.7,0.7,0.2), guide ="none", drop=F)
+```
+
+# TF activity inference
+## Sample wise TF activity inference
+Here we infer TF activities for each individual samples. We focus only on TFs with confidence level A or B. Hif1a has confidence level A and belongs thus to the regulons with the highest quality. Subsequently, we estimate with a t-test whether we find Hif1a differentially activiated in salmonella samples vs corresponding controls. We find Hif1a significantly activated in salmonella treated samples in comparison to the respective control. However, due to the low sample size (3 perturbation and 2 control samples) we lack statistical power and must thus interpret this result with caution.
+```{r "sample-wise tf activities", message=FALSE, warning=FALSE}
+# run viper with dorothea on expression matrix
+tf_scores = run_viper(expr, dorothea_mm, 
+                      options = list(nes = T, method = "scale", minsize = 4, 
+                                     eset.filter = F, verbose = F), tidy = T) %>%
+  as_tibble()
+
+# plot tf activity of Hif1a
+tf_scores %>%
+  filter(tf %in% c("Hif1a")) %>%
+  left_join(meta, by="sample") %>%
+  ggplot(aes(x=treatment, y=activity)) +
+  geom_boxplot() +
+  stat_compare_means(method = "t.test") +
+  geom_point()
+
+```
+
+## Inference of TF activity from contrast
+Instead inferring the TF activity for each sample we can infer the TF activity directly from the contrast. Again we focus only on TFs with confidence level A or B
+```{r "tf analysis on contrast"}
+# convert dorothea regulons to required viper format
+dorothea_ab = dorothea_mm %>% filter(confidence %in% c("A", "B"))
+regulon_list = split(dorothea_ab, dorothea_ab$tf)
+
+viper_regulons = lapply(regulon_list, function(regulon) {
+  tfmode = stats::setNames(regulon$mor, regulon$target)
+  list(tfmode = tfmode, likelihood = rep(1, length(tfmode)))
+  })
+  
+# run msviper with dorothea on contrast
+sig = degs %>%
+  select(gene, statistic) %>%
+  data.frame(row.names = 1, check.names = F)
+
+res = msviper(sig, viper_regulons, ges.filter = F, verbose = F, minsize = 10)
+tf_scores_c = tibble(
+  tf = names(res$es$nes),
+  nes = res$es$nes,
+  pval = res$es$p.value
+) %>%
+  mutate(fdr = p.adjust(pval, method = "BH")) %>%
+  arrange(pval) %>%
+  mutate(rank = row_number())
+
+```
+
+These are the most deregulated TFs upon Salmonella infection (ranked by nominal p-value).
+```{r "most deregulated tfs"}
+tf_scores_c
+
+```
+
+We also find Hif1a significantly activated as a response to the salmonella infection, and it belongs to the most deregulated TFs (rank 15 from 110).
+```{r "hif1a acitivty"}
+tf_scores_c %>%
+  filter(tf == "Hif1a")
+```
+
+# Pathway analysis
+## Sample wise pathway activity inference
+Instead of focusing on the Hif1a TF alone, it might we worth to check the activity of the upstream pathway, namely Hypoxia, using our pathway analysis tool PROGENy. We infer pathway activity on single sample level and access differential pathway activity (of all pathways) between salmonella and control samples via a t-test. Regarding Hypoxia, we lack statistical power to find a significant difference.
+```{r "pathway analysis sample wise", fig.height=15, fig.width=10}
+pw_scores = progeny(expr, organism = "Mouse", scale = TRUE) %>%
+  data.frame(check.names = FALSE) %>%
+  rownames_to_column("sample") %>%
+  gather(pathway, activity, -sample) %>%
+  inner_join(meta, by="sample")
+
+pw_scores %>%
+  ggplot(aes(x=treatment, y=activity)) +
+  geom_boxplot() +
+  geom_point() +
+  ggpubr::stat_compare_means(method = "t.test") +
+  facet_wrap(~pathway, scales = "free", ncol = 2)
+```
+
+## Inference of pathway activity from contrast
+Interestingly we find with this PROGENy approach Hypoxia not deregulated. However, this approach has several limitations and I personally would trust the sample-wise pathway inference approach more.
+```{r "progeny contrast"}
+m = degs %>%
+  select(gene, statistic) %>%
+  data.frame(row.names = 1) %>%
+  as.matrix()
+
+pw_scores_c = progeny(m, organism = "Mouse", perm = 10000, z_scores = T) %>%
+  data.frame(check.names = F) %>%
+  gather(pathway, activity)
+
+pw_scores_c %>%
+  ggplot(aes(x=fct_reorder(pathway, -activity), y = activity, 
+             fill = activity)) +
+  geom_col() +
+  scale_fill_gradient2() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "pathway")
+```
+
+Here we show the most responsive genes of the Hypoxia pathway (including the PROGENy weight, indicating how strong the response is) and how they are deregulated due to salmonella infection. I marked the genes that drive the Hypoxia activity the most. Given these results it appears suspicious that Hypoxia should be not deregulated using the contrast-based approach.
+```{r message=FALSE, warning=FALSE}
+# extract weights for the hypoxia responsive genes
+progeny_weight = getModel(organism = "Mouse") %>%
+  data.frame(check.names = F) %>%
+  rownames_to_column("gene") %>%
+  gather(pathway, weight, -gene) %>%
+  as_tibble() %>%
+  filter(pathway == "Hypoxia" & weight != 0)
+
+# combine responsive genes with logFC from salmonella experiment
+degs %>%
+  inner_join(progeny_weight, by="gene") %>%
+  mutate(importance = logFC * weight,
+         rank = row_number(-importance)) %>%
+  mutate(label = case_when(rank <= 15 ~ gene,
+                           TRUE ~ NA_character_)) %>%
+  ggplot(aes(x=logFC, y=weight, color = -log10(pval))) +
+  geom_point() +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  facet_wrap(~pathway) +
+  geom_label_repel(aes(label = label))
+```
+
+# Sessioninfo
+```{r}
+sessionInfo()
+```
+
