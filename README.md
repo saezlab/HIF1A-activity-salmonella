@@ -1,4 +1,4 @@
-# Response of HIF1A activity to salmonella infection
+# Response of HIF1A to salmonella infection
 
 ## Abstract
 TODO
