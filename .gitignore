@@ -30,6 +30,7 @@ vignettes/*.pdf
 # knitr and R markdown default cache directories
 *_cache/
 /cache/
+README.html
 
 *_files/
 
@@ -46,12 +47,6 @@ docs/
 # translation temp files
 po/*~
 
-# ignore raw data 
-data/pediatric_nafld_cohort/*.txt
-data/pediatric_nafld_cohort/*.txt
-data/pediatric_nafld_cohort/*.xlsx
-data/adult_nafld_cohort/*.csv
+# data
+*.csv
 
-# ignore intermediate results
-output/pediatric_nafld_cohort/*.rds
-output/adult_nafld_cohort/*.rds
