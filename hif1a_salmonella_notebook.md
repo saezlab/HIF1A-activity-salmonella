@@ -384,12 +384,8 @@ p = degs %>%
                      drop = F) +
   scale_alpha_manual(values = c(0.7,0.7,0.2), guide ="none", drop=F)
 
-ggsave("volcano_plot.pdf", p, width = 4.5, height = 7.5)
-```
+#ggsave("volcano_plot.pdf", p, width = 4.5, height = 7.5)
 
-    ## Warning: Removed 109 rows containing missing values (geom_label_repel).
-
-``` r
 # save data for volcano plot
 degs %>%
   inner_join(targets, by="gene") %>%
@@ -660,7 +656,7 @@ draw.pairwise.venn(
 
 ![](hif1a_salmonella_notebook_files/figure-gfm/footprint-overlap-1.png)<!-- -->
 
-    ## (polygon[GRID.polygon.1630], polygon[GRID.polygon.1631], polygon[GRID.polygon.1632], polygon[GRID.polygon.1633], text[GRID.text.1634], text[GRID.text.1635], text[GRID.text.1636], text[GRID.text.1637], text[GRID.text.1638])
+    ## (polygon[GRID.polygon.1519], polygon[GRID.polygon.1520], polygon[GRID.polygon.1521], polygon[GRID.polygon.1522], text[GRID.text.1523], text[GRID.text.1524], text[GRID.text.1525], text[GRID.text.1526], text[GRID.text.1527])
 
 # Sessioninfo
 
@@ -921,7 +917,7 @@ sessioninfo::session_info()
     ##  Bioconductor                                        
     ## 
     ## [1] /Users/cholland/Google Drive/Projects/Hif1aActivityCramer/renv/library/R-4.0/x86_64-apple-darwin17.0
-    ## [2] /private/var/folders/62/y2c8xnr53ln52nm6f4yryb_m0000gp/T/Rtmp0y9w04/renv-system-library
+    ## [2] /private/var/folders/62/y2c8xnr53ln52nm6f4yryb_m0000gp/T/RtmpHDHHji/renv-system-library
     ## 
     ##  P ── Loaded and on-disk path mismatch.
 
